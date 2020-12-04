@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,7 +24,7 @@ import (
 /*TXN_TIME_TOLERANCE - the txn creation date should be within these many seconds before/after of current time */
 
 var TXN_TIME_TOLERANCE int64
-var TXN_MIN_FEE, TXN_MAX_FEE int64
+var TXN_MIN_FEE int64
 
 var transactionCount uint64 = 0
 var redis_txns string
@@ -59,6 +60,12 @@ type Transaction struct {
 	Status            int    `json:"transaction_status" msgpack:"sot"`
 }
 
+type TransactionFeeStats struct {
+	MaxFees  int64 `json:"max_fees"`
+	MeanFees int64 `json:"mean_fees"`
+	MinFees  int64 `json:"min_fees"`
+}
+
 var transactionEntityMetadata *datastore.EntityMetadataImpl
 
 /*GetEntityMetadata - implementing the interface */
@@ -75,13 +82,38 @@ func (t *Transaction) ComputeProperties() {
 	t.ComputeClientID()
 }
 
-// ComputeFee - Calculate fee
-func (t *Transaction) ComputeFee(meanRate float64) {
-	if meanRate == 0 {
-		t.Fee = TXN_MIN_FEE
-		return
+type smartContractTransactionData struct {
+	FunctionName string          `json:"name"`
+	InputData    json.RawMessage `json:"input"`
+}
+
+var exemptedSCFunctions = map[string]bool{
+	"add_miner":            true,
+	"miner_health_check":   true,
+	"add_sharder":          true,
+	"sharder_health_check": true,
+	"contributeMpk":        true,
+	"sharder_keep":         true,
+	"shareSignsOrShares":   true,
+	"wait":                 true,
+}
+
+// ValidateFee - Validate fee
+func (t *Transaction) ValidateFee() error {
+	if t.TransactionData != "" {
+		var smartContractData smartContractTransactionData
+		dataBytes := []byte(t.TransactionData)
+		err := json.Unmarshal(dataBytes, &smartContractData)
+		if err == nil {
+			if _, ok := exemptedSCFunctions[smartContractData.FunctionName]; ok {
+				return nil
+			}
+		}
 	}
-	t.Fee = int64(float64(TXN_MAX_FEE) * meanRate)
+	if t.Fee < TXN_MIN_FEE {
+		return common.InvalidRequest("The given fee is less than the minimum required fee to process the txn")
+	}
+	return nil
 }
 
 /*ComputeClientID - compute the client id if there is a public key in the transaction */
@@ -341,9 +373,8 @@ func SetTxnTimeout(timeout int64) {
 	TXN_TIME_TOLERANCE = timeout
 }
 
-func SetTxnFee(min, max int64) {
+func SetTxnFee(min int64) {
 	TXN_MIN_FEE = min
-	TXN_MAX_FEE = max
 }
 
 func GetTransactionCount() uint64 {
