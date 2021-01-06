@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
@@ -46,6 +47,7 @@ func CloneMPT(mpt MerklePatriciaTrieI) *MerklePatriciaTrie {
 func (mpt *MerklePatriciaTrie) SetNodeDB(ndb NodeDB) {
 	mpt.mutex.Lock()
 	defer mpt.mutex.Unlock()
+	Logger.Debug("MPT SetNodeDB")
 	mpt.db = ndb
 }
 
@@ -277,11 +279,14 @@ func (mpt *MerklePatriciaTrie) PrettyPrint(w io.Writer) error {
 func (mpt *MerklePatriciaTrie) getNodeValue(path Path, node Node) (Serializable, error) {
 	switch nodeImpl := node.(type) {
 	case *LeafNode:
+		Logger.Debug("Leaf node")
 		if bytes.Compare(nodeImpl.Path, path) == 0 {
+			Logger.Debug("get leaf node", zap.String("path", string(path)))
 			return nodeImpl.GetValue(), nil
 		}
 		return nil, ErrValueNotPresent
 	case *FullNode:
+		Logger.Debug("Full node", zap.String("path", string(path)))
 		if len(path) == 0 {
 			return nodeImpl.GetValue(), nil
 		}
@@ -289,12 +294,21 @@ func (mpt *MerklePatriciaTrie) getNodeValue(path Path, node Node) (Serializable,
 		if ckey == nil {
 			return nil, ErrValueNotPresent
 		}
+
 		nnode, err := mpt.db.GetNode(ckey)
 		if err != nil || nnode == nil {
+			if err != nil {
+				Logger.Error("full node get node failed",
+					zap.Int("path len", len(path)),
+					zap.String("path", string(path)),
+					zap.String("key", hex.EncodeToString(ckey)),
+					zap.Error(err))
+			}
 			return nil, ErrNodeNotFound
 		}
 		return mpt.getNodeValue(path[1:], nnode)
 	case *ExtensionNode:
+		Logger.Debug("Extension node")
 		prefix := mpt.matchingPrefix(path, nodeImpl.Path)
 		if len(prefix) == 0 {
 			return nil, ErrValueNotPresent
@@ -302,6 +316,9 @@ func (mpt *MerklePatriciaTrie) getNodeValue(path Path, node Node) (Serializable,
 		if bytes.Compare(nodeImpl.Path, prefix) == 0 {
 			nnode, err := mpt.db.GetNode(nodeImpl.NodeKey)
 			if err != nil || nnode == nil {
+				if err != nil {
+					Logger.Error("extension node get node failed", zap.Error(err))
+				}
 				return nil, ErrNodeNotFound
 			}
 			return mpt.getNodeValue(path[len(prefix):], nnode)
@@ -731,6 +748,7 @@ func (mpt *MerklePatriciaTrie) deleteNode(node Node) error {
 	if DebugMPTNode {
 		Logger.Info("delete node", zap.String("dn", node.GetHash()))
 	}
+	Logger.Debug("delete node", zap.String("dn", node.GetHash()))
 	mpt.ChangeCollector.DeleteChange(node)
 	return mpt.db.DeleteNode(node.GetHashBytes())
 }
@@ -893,25 +911,32 @@ func (mpt *MerklePatriciaTrie) Validate() error {
 
 // MergeMPTChanges - implement interface.
 func (mpt *MerklePatriciaTrie) MergeMPTChanges(mpt2 MerklePatriciaTrieI) error {
-	mpt.mutex.Lock()
-	defer mpt.mutex.Unlock()
+	changes := mpt2.GetChangeCollector().GetChanges()
+	deletes := mpt2.GetChangeCollector().GetDeletes()
 
 	if DebugMPTNode {
 		if err := mpt2.GetChangeCollector().Validate(); err != nil {
 			Logger.Error("MergeMPTChanges - change collector validate", zap.Error(err))
 		}
 	}
-	changes := mpt2.GetChangeCollector().GetChanges()
+
+	Logger.Debug("MergeMPTChanges",
+		zap.Int("change num", len(changes)),
+		zap.Int("delete num", len(deletes)))
+
+	mpt.mutex.Lock()
+	defer mpt.mutex.Unlock()
+
 	for _, c := range changes {
 		if _, _, err := mpt.insertNode(c.Old, c.New); err != nil {
 			return err
 		}
 	}
-	deletes := mpt2.GetChangeCollector().GetDeletes()
 	for _, d := range deletes {
 		if err := mpt.deleteNode(d); err != nil {
 			return err
 		}
+		Logger.Debug("Delete node", zap.String("key", hex.EncodeToString(d.GetHashBytes())))
 	}
 	mpt.setRoot(mpt2.GetRoot())
 	return nil

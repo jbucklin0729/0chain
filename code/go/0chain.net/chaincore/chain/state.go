@@ -7,11 +7,10 @@ import (
 	"math"
 	"time"
 
-	"0chain.net/chaincore/smartcontract"
-
 	"0chain.net/chaincore/block"
 	bcstate "0chain.net/chaincore/chain/state"
 	"0chain.net/chaincore/config"
+	"0chain.net/chaincore/smartcontract"
 	"0chain.net/chaincore/state"
 	"0chain.net/chaincore/transaction"
 	"0chain.net/core/common"
@@ -39,7 +38,10 @@ func init() {
 	SmartContractExecutionTimer = metrics.GetOrRegisterTimer("sc_execute_timer", nil)
 }
 
-var ErrPreviousStateUnavailable = common.NewError("prev_state_unavailable", "Previous state not available")
+var (
+	ErrPreviousStateUnavailable = common.NewError("prev_state_unavailable", "Previous state not available")
+	ErrPreviousStateNotComputed = common.NewError("prev_state_not_computed", "Previous state not computed")
+)
 
 //StateMismatch - indicate if there is a mismatch between computed state and received state of a block
 const StateMismatch = "state_mismatch"
@@ -99,15 +101,9 @@ func (c *Chain) computeState(ctx context.Context, b *block.Block) error {
 		pb = c.GetPreviousBlock(ctx, b)
 		if pb == nil {
 			b.SetStateStatus(block.StateFailed)
-			if state.DebugBlock() {
-				Logger.Error("compute state - previous block not available",
-					zap.Int64("round", b.Round), zap.String("block", b.Hash),
-					zap.String("prev_block", b.PrevHash))
-			} else {
-				Logger.Error("compute state - previous block not available",
-					zap.Int64("round", b.Round), zap.String("block", b.Hash),
-					zap.String("prev_block", b.PrevHash))
-			}
+			Logger.Error("compute state - previous block not available",
+				zap.Int64("round", b.Round), zap.String("block", b.Hash),
+				zap.String("prev_block", b.PrevHash))
 			return ErrPreviousBlockUnavailable
 		}
 	}
@@ -155,6 +151,16 @@ func (c *Chain) computeState(ctx context.Context, b *block.Block) error {
 			zap.Int8("prev_block_status", b.PrevBlock.GetStateStatus()))
 		return ErrPreviousStateUnavailable
 	}
+
+	// Before continue the the following state update for transactions, the previous
+	// block's state must be computed successfully.
+	if !pb.IsStateComputed() {
+		Logger.Error("previous state not compute successfully",
+			zap.Int64("round", b.Round),
+			zap.String("block", b.Hash),
+			zap.Any("state status", pb.GetStateStatus()))
+		return ErrPreviousStateNotComputed
+	}
 	b.SetStateDB(pb)
 
 	Logger.Info("compute state", zap.Int64("round", b.Round),
@@ -191,12 +197,12 @@ func (c *Chain) computeState(ctx context.Context, b *block.Block) error {
 		return ErrStateMismatch
 	}
 	c.StateSanityCheck(ctx, b)
+	b.SetStateStatus(block.StateSuccessful)
 	Logger.Info("compute state successful", zap.Int64("round", b.Round),
 		zap.String("block", b.Hash), zap.Int("block_size", len(b.Txns)),
 		zap.Int("changes", len(b.ClientState.GetChangeCollector().GetChanges())),
 		zap.String("block_state_hash", util.ToHex(b.ClientStateHash)),
 		zap.String("computed_state_hash", util.ToHex(b.ClientState.GetRoot())))
-	b.SetStateStatus(block.StateSuccessful)
 	return nil
 }
 
@@ -347,7 +353,9 @@ func (c *Chain) updateState(b *block.Block, txn *transaction.Transaction) (
 		if err != nil {
 			return
 		}
-
+	default:
+		Logger.Error("Invalid transaction type", zap.Int("txn type", txn.TransactionType))
+		return fmt.Errorf("invalid transaction type: %v", txn.TransactionType)
 	}
 
 	if config.DevConfiguration.IsFeeEnabled {

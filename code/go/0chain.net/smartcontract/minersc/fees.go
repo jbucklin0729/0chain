@@ -7,6 +7,7 @@ import (
 
 	"0chain.net/chaincore/block"
 	cstate "0chain.net/chaincore/chain/state"
+	"0chain.net/chaincore/node"
 	sci "0chain.net/chaincore/smartcontractinterface"
 	"0chain.net/chaincore/state"
 	"0chain.net/chaincore/transaction"
@@ -338,8 +339,41 @@ func (msc *MinerSmartContract) payFees(t *transaction.Transaction,
 	// the block generator
 	var mn *MinerNode
 	if mn, err = msc.getMinerNode(block.MinerID, balances); err != nil {
+		// TODO: remove this debug info after issue is fixed.
+		all, er := msc.getMinersList(balances)
+		if er != nil {
+			Logger.Debug("get miners list failed",
+				zap.Error(er),
+				zap.Int64("round", block.Round),
+				zap.String("block hash", block.Hash))
+		}
+
+		if all == nil {
+			Logger.Debug("miners list is empty")
+		} else {
+			ids := []string{}
+			for _, n := range all.Nodes {
+				ids = append(ids, n.ID)
+			}
+			Logger.Debug("all miners", zap.Strings("miners", ids))
+		}
+
 		return "", common.NewErrorf("pay_fee", "can't get generator '%s': %v",
 			block.MinerID, err)
+	}
+
+	Logger.Debug("Pay fees, get miner id successfully",
+		zap.String("miner id", block.MinerID),
+		zap.Int64("round", block.Round),
+		zap.String("hash", block.Hash))
+
+	selfID := node.Self.Underlying().GetKey()
+	if _, err := msc.getMinerNode(selfID, balances); err != nil {
+		Logger.Debug("Pay fees, get self miner id failed",
+			zap.String("id", selfID),
+			zap.Error(err))
+	} else {
+		Logger.Debug("Pay fees, get self miner id successfully")
 	}
 
 	var (
